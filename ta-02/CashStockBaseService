@@ -1,1 +1,89 @@
+@Slf4j
+public abstract class CashStockBaseService {
+
+    protected final CashStockRepository cashStockRepository;
+    protected final CashStockSessionRepository cashStockSessionRepository;
+    protected final CashStockOperationRepository cashStockOperationRepository;
+    protected final CashStockOperationTypeValueRepository cashStockOperationTypeValueRepository;
+    protected final CashUnitStockRepository cashUnitStockRepository;
+    protected final CashUnitStockStageValueRepository cashUnitStockStageValueRepository;
+    protected final CashUnitStockOperationRepository cashUnitStockOperationRepository;
+    protected final EmployeeRepository employeeRepository;
+    protected final XalosService xalosService;
+
+      protected CashStockOperation createCashStockOperation(String sessionId, String operationTypeName, String employeeRobiId, Integer amount,
+            String comment, String justificationText, String justificationDocNumber, CashStock cashStock,String status,String currency) {
+        CashStockSession session = cashStockSessionRepository.findById(Long.valueOf(sessionId))
+                .orElseThrow(() -> new RuntimeException("Cashstock Session Not found"));
+        CashStockOperationTypeValue typeValue = cashStockOperationTypeValueRepository.findByName(operationTypeName)
+                .orElseThrow(() -> new RuntimeException("CashStockOperationTypeValue not found for name:" + operationTypeName));
+        Employee employee = employeeRepository.findByEmployeeRobiId(employeeRobiId)
+                .orElseThrow(() -> new RuntimeException("Employee not found: " + employeeRobiId));
+        CashStockOperation operation = new CashStockOperation();
+        operation.setCashStockSession(session);
+        operation.setCashStock(cashStock);
+        operation.setCashStockOperationTypeValueId(typeValue);
+        operation.setStatus(status);
+        operation.setAmount(BigInteger.valueOf(amount));
+        operation.setCurrencyCode(currency);
+        operation.setCreationDatetime(LocalDateTime.now());
+        session.setEmployee(employee);
+        operation.setEmployee(employee);
+        operation.setCommentText(comment);
+        operation.setJustificationText(justificationText);
+        operation.setJustificationDocumentNumber(justificationDocNumber);
+        return cashStockOperationRepository.save(operation);
+    }
+
+    protected CashStockOperation updateCashStockOperation(CashStockOperation operation, CashStock cashStock, boolean addAmount,String status) {
+        if (addAmount) {
+            operation.setAmount(cashStock.getAmount().add(operation.getAmount()));
+        }
+        operation.setStatus(status);
+        return cashStockOperationRepository.save(operation);
+    }
+
+    protected void updateCashStock(CashStock cashStock, Integer amount, boolean add) {
+        BigInteger value = BigInteger.valueOf(amount);
+        BigInteger result = add ? cashStock.getAmount().add(value) : cashStock.getAmount().subtract(value);
+        cashStock.setAmount(result);
+        cashStockRepository.save(cashStock);
+    }
+
+    protected void updateCashUnitStock(CashStockSession cashStockSession) {
+        List<CashUnitStock> cashUnitStockList = cashUnitStockRepository.findCashUnitStockByLastStage(cashStockSession.getId(), cashStockSession.getLastCashUnitStockStageValueId().getId());
+        CashUnitStockStageValue stageValue = cashUnitStockStageValueRepository.findByName(Constants.STAGE_WORKED)
+                .orElseThrow(() -> new RuntimeException(Constants.RE_DESC_01));
+        for(CashUnitStock cashUnitStock: cashUnitStockList){
+            cashUnitStock.setCashUnitStockStageValue(stageValue);
+        }
+        cashUnitStockRepository.saveAll(cashUnitStockList);
+    }
+
+    protected void createCashUnitStock(CashStockSession cashStockSession) {
+        List<CashUnitStock> cashUnitStockList = cashUnitStockRepository.findCashUnitStockByLastStage(cashStockSession.getId(), cashStockSession.getLastCashUnitStockStageValueId().getId());
+        CashUnitStockStageValue stageValue = cashUnitStockStageValueRepository.findByName(Constants.STAGE_CLOSED)
+                .orElseThrow(() -> new RuntimeException(Constants.RE_DESC_01));
+        for(CashUnitStock cashUnitStock: cashUnitStockList){
+            cashUnitStock.setCashUnitStockStageValue(stageValue);
+        }
+        cashUnitStockRepository.saveAll(cashUnitStockList);
+    }
+    protected CashStockSession updateCashStockSession(CashStockSession cashStockSession,String status,String stage) {
+        cashStockSession.setStatus(status);
+        CashUnitStockStageValue stageValue = cashUnitStockStageValueRepository.findByName(stage)
+                .orElseThrow(() -> new RuntimeException(Constants.RE_DESC_01));
+        cashStockSession.setLastCashUnitStockStageValueId(stageValue);
+        cashStockSession.setCloseDatetime(LocalDateTime.now());
+        return cashStockSessionRepository.save(cashStockSession);
+    }
+    protected CashStockOperationContextResponse buildResponse(CashStockSession session, CashStockOperation operation) {
+        CashStockOperationContextResponse response = new CashStockOperationContextResponse();
+        response.setCashStockSessionId(String.valueOf(session.getId()));
+        response.setCashStockId(String.valueOf(operation.getCashStock().getId()));
+        response.setCashStockOperationId(String.valueOf(operation.getId()));
+        response.setCashStockOperationStatusName(operation.getStatus());
+        return response;
+    }
+}
 
