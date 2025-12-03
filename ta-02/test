@@ -1,1 +1,20 @@
-
+protected DepositBagContextResponse buildContextResponse(CashStockSession session, CashStockOperation operation, BookingRequestHelper helper) {
+        DepositBagContextResponse response = new DepositBagContextResponse();
+        response.setCashStockSessionId(String.valueOf(session.getId()));
+        response.setCashStockId(String.valueOf(operation.getCashStock().getId()));
+        response.setCashStockOperationId(String.valueOf(operation.getId()));
+        response.setCashStockOperationStatusName(operation.getStatus());
+        BookingResponseHelper responseHelper = new BookingResponseHelper();
+        responseHelper.setRemittanceMessage(helper.getRemittanceMessage());
+        responseHelper.setForce(helper.getForce());
+        responseHelper.setTransactionId(helper.getTransactionId());
+        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        Date transactionDateTime = null;
+        try {
+            transactionDateTime = dateFormat.parse(helper.getTransactionDateTime());
+        } catch (ParseException e) {
+            throw new RuntimeException(e);
+        }
+        responseHelper.setTransactionDateTime(transactionDateTime);
+        return response;
+    }
