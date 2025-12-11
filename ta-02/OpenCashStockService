@@ -1,0 +1,131 @@
+@Slf4j
+@Service
+public class OpenCashStockService {
+    private final Map<Long,ReentrantLock> locks = new ConcurrentHashMap<>();
+    private final CashStockRepository cashStockRepository;
+    private final CashUnitRepository cashUnitRepository;
+    private final CashStockSessionRepository cashStockSessionRepository;
+    private final CashUnitStockRepository cashUnitStockRepository;
+    private final CashStockOperationRepository cashStockOperationRepository;
+    private final CashUnitStockStageValueRepository cashUnitStockStageValueRepository;
+    private final CashStockOperationTypeValueRepository cashStockOperationTypeValueRepository;
+    private final OpenCashStockValidationService validationService;
+    private final EmployeeService employeeService;
+    private final XalosService xalosService;
+    @PersistenceContext
+    private EntityManager entityManager;
+    @Transactional(rollbackFor = CashException.class)
+    public CashStockOperationContextResponse openCashStock(CashStockSessionContextRequest request) throws CashException {
+        long cashstockId = Long.parseLong(request.getCashStockId());
+        ReentrantLock lock = locks.computeIfAbsent(cashstockId,id -> new ReentrantLock());
+        boolean acquired = lock.tryLock();
+        if(!acquired) {
+            throw new CashException(Constants.FE_11,Constants.FE_11_DESC,HttpStatus.CONFLICT,Constants.FE_ERROR,"Another Cash Stock Open operation is in progress. Try again later to request a new opening.");
+        }
+        try {
+            // Step 1: Validate Inputs
+            validationService.validate(request);
+            CashStock cashStock = cashStockRepository.findByIdForUpdate(Long.valueOf(request.getCashStockId()))
+                    .orElseThrow(() -> new RuntimeException("CashStock not found"));
+            if (Constants.STATUS_OPEN.equalsIgnoreCase(cashStock.getStatus())) {
+                throw new CashException(Constants.FE_02, "CashStock is already opened", HttpStatus.CONFLICT, Constants.FE_ERROR, "");
+            }
+            // Step 2: Create Cash Stock Session
+            CashStockSession session = createCashStockSession(request,cashStock);
+            // Step 3: Update Cash Stock Status
+            updateCashStockStatus(session);
+            // Step 4: Create Cash Unit Stocks
+            createCashUnitStocks(request, session, Constants.STAGE_OPENED);
+            // Step 5: Create a Copy in 'WORKING' Stage
+            createCashUnitStocks(request, session, Constants.STAGE_WORKING);
+
+            // Step 6: Update Cash Stock Session with stage WORKING
+            updateCashStockSession(session);
+
+            // Step 6: Create Cash Stock Operation
+            CashStockOperation operation = createCashStockOperation(request, session, cashStock);
+            CashStockOperationContextResponse response = buildResponse(session, operation);
+            logInXalosOpenCashStock(request,response, response.getCashStockId(), String.valueOf(request.getCashStockOperationAmount()),cashStock.getCurrencyCode(),cashStock.getUnitRobiId(), request.getEmployeeRobiId());
+            log.info("Cash stock successfully opened ");
+            return response;
+        } catch (PessimisticLockException | LockTimeoutException e){
+            throw new CashException("KASH_10000099", "Cash Stock is currently being opened by another employee.", HttpStatus.CONFLICT, "Vault in use", "");
+        }
+        catch (CashException e) {
+            log.error("Cash stock opening failed for CashStockId. Rolling back transaction.", e);
+            throw e;
+        } catch (Exception e) {
+           logInXalosOpenCashStock(request,e.getMessage(), request.getCashStockId(), String.valueOf(request.getCashStockOperationAmount()),"","", request.getEmployeeRobiId());
+           throw new CashException("KASH_10000099", "Unexpected error occurred", HttpStatus.INTERNAL_SERVER_ERROR, "System error", "");
+        }  finally {
+            lock.unlock();
+        }
+    }
+
+    CashStockSession createCashStockSession(CashStockSessionContextRequest request, CashStock cashStock) {
+        CashStockSession session = new CashStockSession();
+        session.setCashStock(cashStock);
+        session.setType("BRANCH");
+        session.setStatus(Constants.STATUS_OPEN);
+        session.setOpenDatetime(LocalDateTime.now());
+        Employee employee = employeeService.createOrUpdateEmployee(request.getEmployeeRobiId(),request.getEmployeeFirstName(),request.getEmployeeLastName());
+        entityManager.flush();
+        session.setEmployee(employee);
+        return cashStockSessionRepository.save(session);
+    }
+
+    private void updateCashStockStatus(CashStockSession session) {
+        CashStock cashStock = session.getCashStock();
+        cashStock.setStatus(Constants.STATUS_OPEN);
+        cashStock.setCashStockLastSessionId(session);
+        cashStockRepository.save(cashStock);
+    }
+
+    private void updateCashStockSession(CashStockSession session) {
+        CashUnitStockStageValue stageValue = cashUnitStockStageValueRepository.findByName("WORKING")
+                .orElseThrow(() -> new RuntimeException("Invalid stage value"));
+        session.setLastCashUnitStockStageValueId(stageValue);
+        cashStockSessionRepository.save(session);
+    }
+
+    private void createCashUnitStocks(CashStockSessionContextRequest request, CashStockSession session, String stageName) {
+        for (CashUnitStockContext unitRequest : request.getCashUnitStockContextList()) {
+            CashUnit cashUnit = cashUnitRepository.findById(Long.valueOf(unitRequest.getCashUnitId()))
+                    .orElseThrow(() -> new RuntimeException("CashUnit not found"));
+            CashUnitStockStageValue stockStageValue = cashUnitStockStageValueRepository.findByName(stageName)
+                    .orElseThrow(() -> new RuntimeException("CashUnitStockStageValue not found for name:" + stageName));
+            CashUnitStock unitStock = new CashUnitStock();
+            unitStock.setCashStockSession(session);
+            unitStock.setCashUnit(cashUnit);
+            unitStock.setQuantity(unitRequest.getCashUnitStockQuantity());
+            unitStock.setCashUnitStockStageValue(stockStageValue);
+            cashUnitStockRepository.save(unitStock);
+        }
+    }
+    private CashStockOperation createCashStockOperation(CashStockSessionContextRequest request, CashStockSession session, CashStock cashStock) {
+        CashStockOperation operation = new CashStockOperation();
+        operation.setCashStockSession(session);
+        operation.setCashStock(cashStock);
+        CashStockOperationTypeValue typeValue = cashStockOperationTypeValueRepository.findByName(request.getCashStockOperationTypeName())
+                .orElseThrow(() -> new RuntimeException("CashStockOperationTypeValue not found for name:" + request.getCashStockOperationTypeName()));
+        operation.setCashStockOperationTypeValueId(typeValue);
+        operation.setStatus(Constants.STATUS_EXECUTED);
+        operation.setAmount(BigInteger.valueOf(request.getCashStockOperationAmount()));
+        operation.setCurrencyCode("EUR");
+        operation.setCreationDatetime(LocalDateTime.now());
+        operation.setEmployee(session.getEmployee());
+        operation.setCommentText(request.getCashStockOperationCommentText());
+        operation.setJustificationText(request.getCashStockOperationJustificationText());
+        operation.setJustificationDocumentNumber(request.getCashStockOperationJustificationDocumentNumber());
+        return cashStockOperationRepository.save(operation);
+    }
+    private CashStockOperationContextResponse buildResponse(CashStockSession session, CashStockOperation operation) {
+        CashStockOperationContextResponse response = new CashStockOperationContextResponse();
+        response.setCashStockSessionId(String.valueOf(session.getId()));
+        response.setCashStockId(String.valueOf(operation.getCashStock().getId()));
+        response.setCashStockOperationId(String.valueOf(operation.getId()));
+        response.setCashStockOperationStatusName(operation.getStatus());
+        return response;
+    }
+}
+
